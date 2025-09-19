@@ -48,353 +48,288 @@ def process_paper(paper_info: Dict[str, Any]) -> Dict[str, Any]:
             "abstract": paper_info.get("abstract", ""),
             "published": paper_info.get("published", ""),
             "url": paper_info.get("url", ""),
-            "categories": paper_info.get("categories", [])
+            "summary": paper_info.get("summary", ""),
+            "categories": paper_info.get("categories", []),
+            "doi": paper_info.get("doi", "")
         }
         
-        logger.info(f"处理论文: {processed_info['title'][:50]}...")
+        # 格式化作者信息
+        if isinstance(processed_info["authors"], list):
+            processed_info["authors_str"] = ", ".join(processed_info["authors"])
+        else:
+            processed_info["authors_str"] = str(processed_info["authors"])
+            
+        # 格式化发布日期
+        if processed_info["published"]:
+            try:
+                # 尝试解析日期格式
+                if isinstance(processed_info["published"], str):
+                    processed_info["published_formatted"] = processed_info["published"][:10]
+                else:
+                    processed_info["published_formatted"] = str(processed_info["published"])[:10]
+            except Exception:
+                processed_info["published_formatted"] = processed_info["published"]
+        
         return processed_info
         
     except Exception as e:
-        logger.error(f"处理论文信息失败: {e}")
-        return {}
+        logger.error(f"处理论文信息时出错: {e}")
+        return paper_info
 
-def Fact_Information_Extraction(papers: List[Dict[str, Any]], keyword: str) -> Dict[str, Any]:
+def extract_facts_from_papers(papers: List[Dict[str, Any]], keyword: str) -> Dict[str, Any]:
     """
-    事实信息提取函数
+    从论文中提取事实信息
     
     Args:
         papers: 论文列表
-        keyword: 研究关键词
+        keyword: 搜索关键词
         
     Returns:
         提取的事实信息
     """
     try:
-        logger.info(f"开始提取事实信息，关键词: {keyword}")
+        logger.info(f"开始从 {len(papers)} 篇论文中提取事实信息")
         
-        # 构建提示词
+        # 构建论文摘要文本
         papers_text = ""
         for i, paper in enumerate(papers, 1):
-            papers_text += f"论文{i}: {paper.get('title', '')}\n"
-            papers_text += f"摘要: {paper.get('abstract', '')}\n\n"
-        
-        prompt = f"""
-        基于以下论文信息，提取与关键词"{keyword}"相关的关键事实信息：
-        
-        {papers_text}
-        
-        请提取：
-        1. 核心概念和定义
-        2. 主要研究方法
-        3. 重要发现和结论
-        4. 技术细节和参数
-        5. 研究局限性和挑战
-        
-        请以结构化的方式组织这些信息。
-        """
-        
-        # 调用LLM API
+            processed_paper = process_paper(paper)
+            papers_text += f"\n\n=== 论文 {i} ===\n"
+            papers_text += f"标题: {processed_paper['title']}\n"
+            papers_text += f"作者: {processed_paper.get('authors_str', '')}\n"
+            papers_text += f"发布日期: {processed_paper.get('published_formatted', '')}\n"
+            papers_text += f"摘要: {processed_paper['abstract']}\n"
+            
+        # 获取事实提取提示模板
         try:
-            response = call_llm_api(prompt, model="deepseek")
-            extracted_facts = {
+            from app.core.tpl import get_template
+            fact_extraction_prompt = get_template('fact_extraction_prompt.tpl')
+            prompt = fact_extraction_prompt.render(
+                keyword=keyword,
+                papers_text=papers_text
+            )
+        except Exception as e:
+            logger.warning(f"模板加载失败，使用默认提示: {e}")
+            prompt = f"""
+            请从以下论文中提取与关键词 "{keyword}" 相关的核心事实信息：
+            
+            {papers_text}
+            
+            请提取：
+            1. 核心概念和定义
+            2. 主要研究方法
+            3. 重要发现和结论
+            4. 技术细节和参数
+            5. 数据集和实验设置
+            
+            请以结构化的方式组织这些信息。
+            """
+        
+        # 调用LLM提取事实
+        try:
+            from app.utils.llm_api import call_with_deepseek
+            facts_response = call_with_deepseek(prompt)
+            
+            facts_info = {
                 "keyword": keyword,
-                "extracted_at": datetime.now().isoformat(),
-                "facts": response,
-                "source_papers_count": len(papers)
+                "papers_count": len(papers),
+                "extracted_facts": facts_response,
+                "extraction_time": datetime.now().isoformat(),
+                "papers_summary": papers_text[:1000] + "..." if len(papers_text) > 1000 else papers_text
             }
             
             logger.info("事实信息提取完成")
-            return extracted_facts
+            return facts_info
             
         except Exception as e:
-            logger.error(f"LLM API调用失败: {e}")
-            # 返回简化版本
+            logger.error(f"LLM调用失败: {e}")
+            # 返回基础信息
             return {
                 "keyword": keyword,
-                "extracted_at": datetime.now().isoformat(),
-                "facts": f"基于{len(papers)}篇论文提取的关键词'{keyword}'相关事实信息",
-                "source_papers_count": len(papers)
+                "papers_count": len(papers),
+                "extracted_facts": "事实提取失败，请检查LLM配置",
+                "extraction_time": datetime.now().isoformat(),
+                "error": str(e)
             }
             
     except Exception as e:
-        logger.error(f"事实信息提取失败: {e}")
-        return {"error": str(e)}
+        logger.error(f"事实提取过程出错: {e}")
+        return {
+            "keyword": keyword,
+            "papers_count": len(papers) if papers else 0,
+            "extracted_facts": f"提取失败: {str(e)}",
+            "extraction_time": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
-def Hypothesis_Generate(facts: Dict[str, Any], papers: List[Dict[str, Any]]) -> Dict[str, Any]:
+def generate_hypothesis(facts_info: Dict[str, Any], keyword: str) -> Dict[str, Any]:
     """
-    假设生成函数
+    基于事实信息生成研究假设
     
     Args:
-        facts: 提取的事实信息
-        papers: 相关论文列表
+        facts_info: 提取的事实信息
+        keyword: 研究关键词
         
     Returns:
-        生成的研究假设
+        生成的假设信息
     """
     try:
         logger.info("开始生成研究假设")
         
-        facts_text = facts.get("facts", "")
-        keyword = facts.get("keyword", "")
-        
-        prompt = f"""
-        基于以下事实信息和研究背景，生成创新的研究假设：
-        
-        关键词: {keyword}
-        事实信息: {facts_text}
-        
-        请生成：
-        1. 3-5个具体的研究假设
-        2. 每个假设的理论依据
-        3. 假设的可验证性分析
-        4. 预期的研究意义
-        
-        确保假设具有创新性、可行性和科学价值。
-        """
-        
+        # 获取假设生成提示模板
         try:
-            response = call_llm_api(prompt, model="qwen")
-            hypothesis = {
+            from app.core.tpl import get_template
+            hypothesis_prompt = get_template('hypothesis_generate_prompt.tpl')
+            prompt = hypothesis_prompt.render(
+                keyword=keyword,
+                facts=facts_info.get('extracted_facts', ''),
+                papers_count=facts_info.get('papers_count', 0)
+            )
+        except Exception as e:
+            logger.warning(f"模板加载失败，使用默认提示: {e}")
+            prompt = f"""
+            基于以下事实信息，为关键词 "{keyword}" 生成创新的研究假设：
+            
+            事实信息：
+            {facts_info.get('extracted_facts', '')}
+            
+            请生成：
+            1. 3-5个具有创新性的研究假设
+            2. 每个假设的理论依据
+            3. 可能的验证方法
+            4. 预期的研究贡献
+            
+            请确保假设具有科学性、可验证性和创新性。
+            """
+        
+        # 调用LLM生成假设
+        try:
+            from app.utils.llm_api import call_with_deepseek
+            hypothesis_response = call_with_deepseek(prompt)
+            
+            hypothesis_info = {
                 "keyword": keyword,
-                "generated_at": datetime.now().isoformat(),
-                "hypotheses": response,
-                "based_on_facts": True
+                "generated_hypothesis": hypothesis_response,
+                "based_on_facts": facts_info.get('extracted_facts', '')[:500] + "...",
+                "generation_time": datetime.now().isoformat(),
+                "papers_count": facts_info.get('papers_count', 0)
             }
             
             logger.info("研究假设生成完成")
-            return hypothesis
+            return hypothesis_info
             
         except Exception as e:
-            logger.error(f"假设生成API调用失败: {e}")
+            logger.error(f"假设生成LLM调用失败: {e}")
             return {
                 "keyword": keyword,
-                "generated_at": datetime.now().isoformat(),
-                "hypotheses": f"基于关键词'{keyword}'生成的研究假设",
-                "based_on_facts": True
+                "generated_hypothesis": "假设生成失败，请检查LLM配置",
+                "generation_time": datetime.now().isoformat(),
+                "error": str(e)
             }
             
     except Exception as e:
-        logger.error(f"假设生成失败: {e}")
-        return {"error": str(e)}
+        logger.error(f"假设生成过程出错: {e}")
+        return {
+            "keyword": keyword,
+            "generated_hypothesis": f"生成失败: {str(e)}",
+            "generation_time": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
-def Initial_Idea(hypothesis: Dict[str, Any], papers: List[Dict[str, Any]]) -> Dict[str, Any]:
+def optimize_research_idea(hypothesis_info: Dict[str, Any], keyword: str) -> Dict[str, Any]:
     """
-    初始想法生成函数
+    优化研究想法
     
     Args:
-        hypothesis: 研究假设
-        papers: 相关论文列表
+        hypothesis_info: 假设信息
+        keyword: 研究关键词
         
     Returns:
-        初始研究想法
+        优化后的研究想法
     """
     try:
-        logger.info("开始生成初始研究想法")
+        logger.info("开始优化研究想法")
         
-        hypothesis_text = hypothesis.get("hypotheses", "")
-        keyword = hypothesis.get("keyword", "")
-        
-        prompt = f"""
-        基于以下研究假设，发展具体的研究想法和实施方案：
-        
-        关键词: {keyword}
-        研究假设: {hypothesis_text}
-        
-        请提供：
-        1. 详细的研究方案
-        2. 实验设计思路
-        3. 数据收集策略
-        4. 分析方法选择
-        5. 预期结果和影响
-        
-        确保方案具有可操作性和创新性。
-        """
-        
+        # 尝试使用MOA优化
         try:
-            response = call_llm_api(prompt, model="deepseek")
-            initial_idea = {
+            from app.core.moa import moa_idea_iteration
+            optimized_result = moa_idea_iteration(
+                keyword=keyword,
+                hypothesis=hypothesis_info.get('generated_hypothesis', ''),
+                papers_info=hypothesis_info.get('based_on_facts', '')
+            )
+            
+            optimization_info = {
                 "keyword": keyword,
-                "generated_at": datetime.now().isoformat(),
-                "research_idea": response,
-                "based_on_hypothesis": True
+                "original_hypothesis": hypothesis_info.get('generated_hypothesis', ''),
+                "optimized_idea": optimized_result,
+                "optimization_method": "MOA (Mixture of Agents)",
+                "optimization_time": datetime.now().isoformat()
             }
             
-            logger.info("初始研究想法生成完成")
-            return initial_idea
+            logger.info("研究想法优化完成")
+            return optimization_info
             
         except Exception as e:
-            logger.error(f"初始想法生成API调用失败: {e}")
-            return {
-                "keyword": keyword,
-                "generated_at": datetime.now().isoformat(),
-                "research_idea": f"基于假设生成的关键词'{keyword}'研究想法",
-                "based_on_hypothesis": True
-            }
+            logger.warning(f"MOA优化失败，使用简单优化: {e}")
             
+            # 简单优化方案
+            try:
+                from app.utils.llm_api import call_with_deepseek
+                
+                optimization_prompt = f"""
+                请对以下研究假设进行技术优化和完善：
+                
+                关键词: {keyword}
+                原始假设: {hypothesis_info.get('generated_hypothesis', '')}
+                
+                请从以下角度进行优化：
+                1. 技术可行性分析
+                2. 创新点突出
+                3. 实验设计建议
+                4. 预期成果和影响
+                5. 潜在挑战和解决方案
+                
+                请提供一个完整、优化的研究方案。
+                """
+                
+                optimized_response = call_with_deepseek(optimization_prompt)
+                
+                optimization_info = {
+                    "keyword": keyword,
+                    "original_hypothesis": hypothesis_info.get('generated_hypothesis', ''),
+                    "optimized_idea": optimized_response,
+                    "optimization_method": "Simple LLM Optimization",
+                    "optimization_time": datetime.now().isoformat()
+                }
+                
+                return optimization_info
+                
+            except Exception as e:
+                logger.error(f"简单优化也失败: {e}")
+                return {
+                    "keyword": keyword,
+                    "original_hypothesis": hypothesis_info.get('generated_hypothesis', ''),
+                    "optimized_idea": "优化失败，请检查配置",
+                    "optimization_method": "Failed",
+                    "optimization_time": datetime.now().isoformat(),
+                    "error": str(e)
+                }
+                
     except Exception as e:
-        logger.error(f"初始想法生成失败: {e}")
-        return {"error": str(e)}
+        logger.error(f"研究想法优化过程出错: {e}")
+        return {
+            "keyword": keyword,
+            "original_hypothesis": hypothesis_info.get('generated_hypothesis', ''),
+            "optimized_idea": f"优化失败: {str(e)}",
+            "optimization_method": "Error",
+            "optimization_time": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
-def Technical_Optimization(idea: Dict[str, Any]) -> Dict[str, Any]:
+def generate_research_paper_main(keyword: str, search_paper_num: int = 10) -> Dict[str, Any]:
     """
-    技术优化函数
-    
-    Args:
-        idea: 初始研究想法
-        
-    Returns:
-        技术优化后的想法
-    """
-    try:
-        logger.info("开始技术优化")
-        
-        idea_text = idea.get("research_idea", "")
-        keyword = idea.get("keyword", "")
-        
-        prompt = f"""
-        对以下研究想法进行技术层面的优化和改进：
-        
-        关键词: {keyword}
-        研究想法: {idea_text}
-        
-        请从以下角度优化：
-        1. 技术可行性分析
-        2. 方法学改进建议
-        3. 工具和技术选择
-        4. 实施难点和解决方案
-        5. 质量控制措施
-        
-        提供具体的技术改进方案。
-        """
-        
-        try:
-            response = call_llm_api(prompt, model="qwen")
-            optimized_idea = {
-                "keyword": keyword,
-                "optimized_at": datetime.now().isoformat(),
-                "optimized_idea": response,
-                "optimization_type": "technical"
-            }
-            
-            logger.info("技术优化完成")
-            return optimized_idea
-            
-        except Exception as e:
-            logger.error(f"技术优化API调用失败: {e}")
-            return {
-                "keyword": keyword,
-                "optimized_at": datetime.now().isoformat(),
-                "optimized_idea": f"技术优化后的关键词'{keyword}'研究方案",
-                "optimization_type": "technical"
-            }
-            
-    except Exception as e:
-        logger.error(f"技术优化失败: {e}")
-        return {"error": str(e)}
-
-def MoA_Based_Optimization(optimized_idea: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    基于MoA的优化函数
-    
-    Args:
-        optimized_idea: 技术优化后的想法
-        
-    Returns:
-        MoA优化后的想法
-    """
-    try:
-        logger.info("开始MoA优化")
-        
-        idea_text = optimized_idea.get("optimized_idea", "")
-        keyword = optimized_idea.get("keyword", "")
-        
-        # 使用多智能体方法进行优化
-        try:
-            moa_result = run_moa_optimization(idea_text, keyword)
-            
-            moa_optimized = {
-                "keyword": keyword,
-                "moa_optimized_at": datetime.now().isoformat(),
-                "moa_result": moa_result,
-                "optimization_type": "moa"
-            }
-            
-            logger.info("MoA优化完成")
-            return moa_optimized
-            
-        except Exception as e:
-            logger.error(f"MoA优化失败: {e}")
-            return {
-                "keyword": keyword,
-                "moa_optimized_at": datetime.now().isoformat(),
-                "moa_result": f"MoA优化后的关键词'{keyword}'研究方案",
-                "optimization_type": "moa"
-            }
-            
-    except Exception as e:
-        logger.error(f"MoA优化失败: {e}")
-        return {"error": str(e)}
-
-def Human_AI_Collaboration(moa_result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    人机协作优化函数
-    
-    Args:
-        moa_result: MoA优化结果
-        
-    Returns:
-        人机协作优化后的最终结果
-    """
-    try:
-        logger.info("开始人机协作优化")
-        
-        moa_text = moa_result.get("moa_result", "")
-        keyword = moa_result.get("keyword", "")
-        
-        prompt = f"""
-        对以下MoA优化后的研究方案进行最终的人机协作优化：
-        
-        关键词: {keyword}
-        MoA优化结果: {moa_text}
-        
-        请提供：
-        1. 最终的研究方案
-        2. 实施时间表
-        3. 资源需求分析
-        4. 风险评估和应对策略
-        5. 预期成果和影响
-        
-        确保方案的完整性和可执行性。
-        """
-        
-        try:
-            response = call_llm_api(prompt, model="deepseek")
-            final_result = {
-                "keyword": keyword,
-                "final_optimized_at": datetime.now().isoformat(),
-                "final_research_plan": response,
-                "optimization_complete": True
-            }
-            
-            logger.info("人机协作优化完成")
-            return final_result
-            
-        except Exception as e:
-            logger.error(f"人机协作优化API调用失败: {e}")
-            return {
-                "keyword": keyword,
-                "final_optimized_at": datetime.now().isoformat(),
-                "final_research_plan": f"人机协作优化后的关键词'{keyword}'最终研究方案",
-                "optimization_complete": True
-            }
-            
-    except Exception as e:
-        logger.error(f"人机协作优化失败: {e}")
-        return {"error": str(e)}
-
-def main(keyword: str, search_paper_num: int = 5) -> Dict[str, Any]:
-    """
-    主函数：执行完整的论文生成流程
+    主要的研究论文生成流程
     
     Args:
         keyword: 研究关键词
@@ -404,109 +339,64 @@ def main(keyword: str, search_paper_num: int = 5) -> Dict[str, Any]:
         完整的研究结果
     """
     try:
-        logger.info(f"开始执行论文生成流程，关键词: {keyword}, 论文数量: {search_paper_num}")
+        logger.info(f"开始生成研究论文，关键词: {keyword}, 论文数量: {search_paper_num}")
         
-        # 创建结果字典
         result = {
             "keyword": keyword,
             "search_paper_num": search_paper_num,
-            "started_at": datetime.now().isoformat(),
+            "start_time": datetime.now().isoformat(),
             "status": "processing"
         }
         
-        # 1. 搜索相关论文
+        # 步骤1: 搜索论文
         logger.info("步骤1: 搜索相关论文")
         try:
-            papers = search_papers(keyword, max_results=search_paper_num)
+            from app.utils.arxiv_api import get_papers
+            papers = get_papers(keyword, max_results=search_paper_num)
+            result["papers"] = papers
             result["papers_found"] = len(papers)
             logger.info(f"找到 {len(papers)} 篇相关论文")
         except Exception as e:
             logger.error(f"论文搜索失败: {e}")
-            # 使用模拟数据
-            papers = [
-                {
-                    "title": f"关于{keyword}的研究论文1",
-                    "abstract": f"这是一篇关于{keyword}的研究论文摘要",
-                    "authors": ["作者1", "作者2"],
-                    "published": "2024-01-01",
-                    "url": "https://example.com/paper1"
-                }
-            ]
-            result["papers_found"] = len(papers)
+            result["papers"] = []
+            result["papers_found"] = 0
+            result["search_error"] = str(e)
         
-        # 2. 事实信息提取
-        logger.info("步骤2: 事实信息提取")
-        facts = Fact_Information_Extraction(papers, keyword)
-        result["facts_extraction"] = facts
+        # 步骤2: 提取事实信息
+        logger.info("步骤2: 提取事实信息")
+        facts_info = extract_facts_from_papers(result.get("papers", []), keyword)
+        result["facts_info"] = facts_info
         
-        # 3. 假设生成
-        logger.info("步骤3: 假设生成")
-        hypothesis = Hypothesis_Generate(facts, papers)
-        result["hypothesis_generation"] = hypothesis
+        # 步骤3: 生成假设
+        logger.info("步骤3: 生成研究假设")
+        hypothesis_info = generate_hypothesis(facts_info, keyword)
+        result["hypothesis_info"] = hypothesis_info
         
-        # 4. 初始想法生成
-        logger.info("步骤4: 初始想法生成")
-        initial_idea = Initial_Idea(hypothesis, papers)
-        result["initial_idea"] = initial_idea
-        
-        # 5. 技术优化
-        logger.info("步骤5: 技术优化")
-        tech_optimized = Technical_Optimization(initial_idea)
-        result["technical_optimization"] = tech_optimized
-        
-        # 6. MoA优化
-        logger.info("步骤6: MoA优化")
-        moa_optimized = MoA_Based_Optimization(tech_optimized)
-        result["moa_optimization"] = moa_optimized
-        
-        # 7. 人机协作优化
-        logger.info("步骤7: 人机协作优化")
-        final_result = Human_AI_Collaboration(moa_optimized)
-        result["human_ai_collaboration"] = final_result
+        # 步骤4: 优化研究想法
+        logger.info("步骤4: 优化研究想法")
+        optimization_info = optimize_research_idea(hypothesis_info, keyword)
+        result["optimization_info"] = optimization_info
         
         # 完成
-        result["completed_at"] = datetime.now().isoformat()
         result["status"] = "completed"
+        result["end_time"] = datetime.now().isoformat()
+        result["total_duration"] = "处理完成"
         
-        logger.info("论文生成流程完成")
-        
-        # 保存结果到文件
-        try:
-            output_file = f"temp/research_result_{keyword}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            save_to_file(result, output_file)
-            result["output_file"] = output_file
-        except Exception as e:
-            logger.warning(f"保存结果文件失败: {e}")
-        
+        logger.info("研究论文生成流程完成")
         return result
         
     except Exception as e:
-        logger.error(f"主流程执行失败: {e}", exc_info=True)
+        logger.error(f"研究论文生成主流程出错: {e}")
         return {
             "keyword": keyword,
+            "search_paper_num": search_paper_num,
+            "status": "error",
             "error": str(e),
-            "status": "failed",
-            "failed_at": datetime.now().isoformat()
+            "end_time": datetime.now().isoformat()
         }
 
-class Task:
-    """任务类，用于兼容性"""
-    
-    def __init__(self, task_id: str, keyword: str, search_paper_num: int):
-        self.task_id = task_id
-        self.keyword = keyword
-        self.search_paper_num = search_paper_num
-        self.status = "PENDING"
-        self.result = None
-        self.error = None
-        self.created_at = datetime.now()
-
 if __name__ == "__main__":
-    # 测试主函数
-    if len(sys.argv) > 1:
-        test_keyword = sys.argv[1]
-        test_num = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-        
-        print(f"测试论文生成流程: {test_keyword}")
-        result = main(test_keyword, test_num)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    # 测试代码
+    test_keyword = "machine learning"
+    test_result = generate_research_paper_main(test_keyword, 5)
+    print(json.dumps(test_result, indent=2, ensure_ascii=False))

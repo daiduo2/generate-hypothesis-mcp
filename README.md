@@ -98,28 +98,38 @@ python astroinsight_optimized_fastmcp.py
 
 - `feat`: 增加新功能
 - `fix`: 修复问题/BUG
-- `style`: 代码风格相关无影响运行结果的
-- `perf`: 优化/性能提升
-- `refactor`: 重构
-- `revert`: 撤销修改
-- `test`: 测试相关
-- `docs`: 文档/注释
-- `chore`: 依赖更新/脚手架配置修改等
+- `docs`: 文档修改
+- `style`: 代码格式修改
+- `refactor`: 代码重构
+- `test`: 测试用例修改
+- `chore`: 其他修改
 
-### 编码规范
+### 代码规范
 
-- Python文件编码为 `utf-8`
-- 遵循PEP 8代码风格
-- 添加必要的函数和类注释
+- 遵循PEP 8编码规范
+- 使用类型注解
+- 编写完整的文档字符串
+- 保持代码简洁易读
+
+## 贡献指南
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 打开 Pull Request
 
 ## 许可证
 
-本项目采用MIT许可证，详见LICENSE文件。
-
-## 贡献
-
-欢迎提交Issue和Pull Request来改进这个项目。
+本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情
 
 ## 联系方式
 
-如有问题或建议，请通过GitHub Issues联系我们。
+如有问题或建议，请通过以下方式联系：
+
+- 提交 Issue
+- 发送邮件至项目维护者
+
+---
+
+**AstroInsight Research Assistant** - 让AI助力您的学术研究之旅！
